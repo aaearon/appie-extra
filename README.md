@@ -24,14 +24,54 @@ Companion tool for [gwillem/appie-go](https://github.com/gwillem/appie-go) that 
 | `koopzegels` | Show koopzegels (stamp) balance, interest, and savings goal |
 | `brabantia` | Show Brabantia spaaractie status and stamp balance |
 | `delivery-slots` | Show available delivery time slots |
+| `basket` | Show current winkelmandje contents |
+| `basket-add <product-id> [qty]` | Add product to winkelmandje |
+| `basket-remove <product-id>` | Remove product from winkelmandje |
 
-All output is JSON.
+## Output contract
+
+Every command emits a single JSON envelope on stdout (2-space indent).
+
+Success:
+
+```jsonc
+{"ok": true, "data": <typed payload>, "meta": {...optional...}, "warnings": [...optional...]}
+```
+
+Error:
+
+```jsonc
+{"ok": false, "error": {"code": "string", "message": "string", "details": {...optional...}}}
+```
+
+`meta` and `warnings` are omitted when empty. `data` is omitted on errors (except for `partial_failure`, where partial results plus the failure list are returned together with `ok: false`).
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | user error / bad args / validation |
+| 2 | not authenticated, token refresh failed |
+| 3 | upstream / network failure |
+| 4 | not found |
+
+### Error codes
+
+`bad_args`, `invalid_int`, `missing_arg`, `unexpected_arg`, `invalid_input`, `not_authenticated`, `upstream_failed`, `not_found`, `partial_failure`, `unknown_command`, `config_error`.
+
+### Global flags
+
+| Flag | Description |
+|------|-------------|
+| `--no-images` (alias `--minimal`) | Strip image URLs from product payloads recursively |
+| `--verbose` | Increase logging verbosity |
 
 ## Prerequisites
 
 1. Install [appie-go](https://github.com/gwillem/appie-go)
 2. Authenticate: `appie login`
-3. For `delivery-slots`: create `~/ah-assistant/config.json` with your delivery address:
+3. For `delivery-slots`: create `~/grocery-assistant/ah/config.json` with your delivery address:
 
 ```json
 {

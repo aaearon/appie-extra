@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureStdout swaps os.Stdout for a pipe and returns whatever was written.
@@ -257,4 +258,77 @@ func TestParseGlobalFlagsRejectsUnknown(t *testing.T) {
 	if !bytes.Contains(out, []byte(`"bad_args"`)) {
 		t.Errorf("expected bad_args envelope; got: %s", out)
 	}
+}
+
+func TestParseBonusDateArg(t *testing.T) {
+	fixed := func() string { return "2026-05-22" }
+
+	t.Run("empty uses default", func(t *testing.T) {
+		date, rest := parseBonusDateArg(nil, fixed)
+		if date != "2026-05-22" {
+			t.Errorf("date = %q, want default", date)
+		}
+		if len(rest) != 0 {
+			t.Errorf("rest = %v, want empty", rest)
+		}
+	})
+
+	t.Run("next consumes arg", func(t *testing.T) {
+		date, rest := parseBonusDateArg([]string{"next"}, fixed)
+		want, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			t.Fatalf("returned date %q not parseable: %v", date, err)
+		}
+		if want.Weekday() != time.Sunday {
+			t.Errorf("next should resolve to a Sunday, got %s (%s)", date, want.Weekday())
+		}
+		if len(rest) != 0 {
+			t.Errorf("rest = %v, want empty", rest)
+		}
+	})
+
+	t.Run("explicit date consumes arg", func(t *testing.T) {
+		date, rest := parseBonusDateArg([]string{"2026-05-25", "25"}, fixed)
+		if date != "2026-05-25" {
+			t.Errorf("date = %q, want 2026-05-25", date)
+		}
+		if len(rest) != 1 || rest[0] != "25" {
+			t.Errorf("rest = %v, want [25]", rest)
+		}
+	})
+
+	t.Run("invalid date-shaped arg rejects", func(t *testing.T) {
+		var out []byte
+		gotCode := withFakeExit(t, func() {
+			out = captureStdout(t, func() {
+				_, _ = parseBonusDateArg([]string{"2026-13-99"}, fixed)
+			})
+		})
+		if gotCode != exitUserError {
+			t.Errorf("exit = %d, want %d", gotCode, exitUserError)
+		}
+		if !bytes.Contains(out, []byte(`"bad_args"`)) {
+			t.Errorf("expected bad_args envelope; got: %s", out)
+		}
+	})
+
+	t.Run("numeric limit is not consumed", func(t *testing.T) {
+		date, rest := parseBonusDateArg([]string{"25"}, fixed)
+		if date != "2026-05-22" {
+			t.Errorf("date = %q, want default", date)
+		}
+		if len(rest) != 1 || rest[0] != "25" {
+			t.Errorf("rest = %v, want [25]", rest)
+		}
+	})
+
+	t.Run("mixed next + limit", func(t *testing.T) {
+		date, rest := parseBonusDateArg([]string{"next", "25"}, fixed)
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			t.Fatalf("date = %q, want parseable date", date)
+		}
+		if len(rest) != 1 || rest[0] != "25" {
+			t.Errorf("rest = %v, want [25]", rest)
+		}
+	})
 }

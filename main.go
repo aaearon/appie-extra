@@ -422,18 +422,73 @@ func cmdRecipe(ctx context.Context, args []string) {
 	emitSuccess(decoded, nil, nil)
 }
 
+// parseBonusDateArg pulls an optional `next|YYYY-MM-DD` argument off the
+// front of args. Returns the resolved date string plus the remaining
+// (unconsumed) args. If args[0] is anything else (e.g. a numeric limit), it
+// is left in rest so the caller can interpret it. A date-shaped but
+// unparseable arg (10 chars, two dashes) is rejected with bad_args — AH
+// would reject it upstream anyway and failing fast is more useful.
+//
+// defaultDate computes the date to use when no explicit date arg is given.
+// Callers differ on the default: bonus-products uses today, bonusbox uses
+// today's Sunday. The empty-string sentinel that appie-go's getBonusSection
+// recognizes is never used through this path — appie-extra always passes an
+// explicit date to the library.
+func parseBonusDateArg(args []string, defaultDate func() string) (date string, rest []string) {
+	if len(args) == 0 {
+		return defaultDate(), args
+	}
+	first := args[0]
+	if first == "next" {
+		now := time.Now()
+		daysSinceSun := int(now.Weekday())
+		return now.AddDate(0, 0, -daysSinceSun+7).Format("2006-01-02"), args[1:]
+	}
+	if len(first) == 10 && strings.Count(first, "-") == 2 {
+		if _, err := time.Parse("2006-01-02", first); err != nil {
+			emitError("bad_args", fmt.Sprintf("invalid date %q: expected YYYY-MM-DD", first), exitUserError)
+			return "", args
+		}
+		return first, args[1:]
+	}
+	return defaultDate(), args
+}
+
+func today() string {
+	return time.Now().Format("2006-01-02")
+}
+
+func currentSunday() string {
+	now := time.Now()
+	daysSinceSun := int(now.Weekday())
+	return now.AddDate(0, 0, -daysSinceSun).Format("2006-01-02")
+}
+
 func cmdBonusProducts(ctx context.Context, args []string) {
-	requireAtMostArgs(args, 1, "appie-extra bonus-products [limit]")
+	requireAtMostArgs(args, 2, "appie-extra bonus-products [next|YYYY-MM-DD] [limit]")
 	client := mustAuthOrEmit(ctx)
 
-	products, err := client.GetBonusProducts(ctx)
+	date, rest := parseBonusDateArg(args, today)
+
+	products, failures, err := client.GetBonusProducts(ctx, date)
 	if err != nil {
 		emitError("upstream_failed", fmt.Sprintf("GetBonusProducts failed: %v", err), exitUpstreamError)
 	}
 
+	if len(products) == 0 && len(failures) > 0 {
+		details := map[string]any{
+			"bonusStartDate":    date,
+			"failed_categories": categoryErrorList(failures),
+		}
+		emitErrorDetails("partial_failure",
+			fmt.Sprintf("all %d bonus categories failed for date %s", len(failures), date),
+			details, exitUpstreamError)
+		return
+	}
+
 	limit := 50
-	if len(args) > 0 {
-		limit = parsePositiveInt(args[0], "limit")
+	if len(rest) > 0 {
+		limit = parsePositiveInt(rest[0], "limit")
 	}
 	limit = clampMax(limit, len(products))
 
@@ -445,10 +500,29 @@ func cmdBonusProducts(ctx context.Context, args []string) {
 		data = sliced
 	}
 
-	emitSuccess(data, map[string]any{
-		"total": len(products),
-		"limit": limit,
-	}, nil)
+	meta := map[string]any{
+		"total":          len(products),
+		"limit":          limit,
+		"bonusStartDate": date,
+	}
+	var warnings []string
+	if len(failures) > 0 {
+		meta["failed_categories"] = categoryErrorList(failures)
+		warnings = append(warnings, fmt.Sprintf("%d bonus categories failed; partial results returned", len(failures)))
+	}
+
+	emitSuccess(data, meta, warnings)
+}
+
+func categoryErrorList(failures []appie.CategoryError) []map[string]string {
+	out := make([]map[string]string, 0, len(failures))
+	for _, f := range failures {
+		out = append(out, map[string]string{
+			"category": f.Category,
+			"error":    f.Err.Error(),
+		})
+	}
+	return out
 }
 
 func cmdBonusSpotlight(ctx context.Context, args []string) {
@@ -473,19 +547,10 @@ func cmdBonusBox(ctx context.Context, args []string) {
 	requireAtMostArgs(args, 1, "appie-extra bonusbox [next|YYYY-MM-DD]")
 	client := mustAuthOrEmit(ctx)
 
-	var bonusDate string
-	if len(args) > 0 {
-		if args[0] == "next" {
-			now := time.Now()
-			daysSinceSun := int(now.Weekday())
-			bonusDate = now.AddDate(0, 0, -daysSinceSun+7).Format("2006-01-02")
-		} else {
-			bonusDate = args[0]
-		}
-	} else {
-		now := time.Now()
-		daysSinceSun := int(now.Weekday())
-		bonusDate = now.AddDate(0, 0, -daysSinceSun).Format("2006-01-02")
+	bonusDate, rest := parseBonusDateArg(args, currentSunday)
+	if len(rest) > 0 {
+		emitError("unexpected_arg", fmt.Sprintf("unexpected argument: %q; usage: appie-extra bonusbox [next|YYYY-MM-DD]", rest[0]), exitUserError)
+		return
 	}
 
 	var result json.RawMessage
@@ -844,7 +909,7 @@ func cmdHelp() {
 		{"previously-bought", "previously-bought [size] [page]", "Get purchase history (default size=50, page=0)"},
 		{"search-recipes", "search-recipes [query] [size]", "Search Allerhande recipes (default size=10)"},
 		{"recipe", "recipe <id>", "Get full recipe with ingredients and steps"},
-		{"bonus-products", "bonus-products [limit]", "Get all current bonus products (default 50)"},
+		{"bonus-products", "bonus-products [next|YYYY-MM-DD] [limit]", "Get bonus products for a week (default: today, limit 50)"},
 		{"bonus-spotlight", "bonus-spotlight", "Get featured/highlighted bonus products"},
 		{"bonusbox", "bonusbox [next|YYYY-MM-DD]", "Show personal Bonus Box offers (default: this week)"},
 		{"add-freetext", "add-freetext <text> [qty]", "Add free-text item to shopping list"},

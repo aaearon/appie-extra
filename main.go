@@ -465,10 +465,22 @@ func currentSunday() string {
 }
 
 func cmdBonusProducts(ctx context.Context, args []string) {
-	requireAtMostArgs(args, 2, "appie-extra bonus-products [next|YYYY-MM-DD] [limit]")
-	client := mustAuthOrEmit(ctx)
+	const usage = "appie-extra bonus-products [next|YYYY-MM-DD] [limit]"
+	requireAtMostArgs(args, 2, usage)
 
+	// Parse and validate all args *before* the upstream call so an invalid
+	// limit or stray extra arg fails fast with no wasted network round-trip.
 	date, rest := parseBonusDateArg(args, today)
+	limit := 50
+	if len(rest) > 0 {
+		limit = parsePositiveInt(rest[0], "limit")
+	}
+	if len(rest) > 1 {
+		emitError("unexpected_arg", fmt.Sprintf("unexpected argument: %q; usage: %s", rest[1], usage), exitUserError)
+		return
+	}
+
+	client := mustAuthOrEmit(ctx)
 
 	products, failures, err := client.GetBonusProducts(ctx, date)
 	if err != nil {
@@ -477,8 +489,8 @@ func cmdBonusProducts(ctx context.Context, args []string) {
 
 	if len(products) == 0 && len(failures) > 0 {
 		details := map[string]any{
-			"bonusStartDate":    date,
-			"failed_categories": categoryErrorList(failures),
+			"bonusStartDate":   date,
+			"failedCategories": categoryErrorList(failures),
 		}
 		emitErrorDetails("partial_failure",
 			fmt.Sprintf("all %d bonus categories failed for date %s", len(failures), date),
@@ -486,12 +498,7 @@ func cmdBonusProducts(ctx context.Context, args []string) {
 		return
 	}
 
-	limit := 50
-	if len(rest) > 0 {
-		limit = parsePositiveInt(rest[0], "limit")
-	}
 	limit = clampMax(limit, len(products))
-
 	sliced := products[:limit]
 	var data any
 	if flags.noImages {
@@ -507,7 +514,7 @@ func cmdBonusProducts(ctx context.Context, args []string) {
 	}
 	var warnings []string
 	if len(failures) > 0 {
-		meta["failed_categories"] = categoryErrorList(failures)
+		meta["failedCategories"] = categoryErrorList(failures)
 		warnings = append(warnings, fmt.Sprintf("%d bonus categories failed; partial results returned", len(failures)))
 	}
 

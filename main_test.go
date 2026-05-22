@@ -244,6 +244,47 @@ func TestParseGlobalFlagsFlagBeforeCommand(t *testing.T) {
 	}
 }
 
+func TestDetectActivationMismatch(t *testing.T) {
+	cases := []struct {
+		fixture       string
+		requested     string
+		wantReturned  []string
+		wantMismatch  bool
+	}{
+		{"testdata/bonusbox_match.json", "2026-05-25", nil, false},
+		{"testdata/bonusbox_single_mismatch.json", "2026-05-25", []string{"2026-05-18"}, true},
+		{"testdata/bonusbox_mixed_mismatch.json", "2026-05-25", []string{"2026-05-11", "2026-05-18"}, true},
+		{"testdata/bonusbox_empty.json", "2026-05-25", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.fixture, func(t *testing.T) {
+			raw, err := os.ReadFile(c.fixture)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			got, mismatch := detectActivationMismatch(raw, c.requested)
+			if mismatch != c.wantMismatch {
+				t.Errorf("mismatch = %v, want %v", mismatch, c.wantMismatch)
+			}
+			if !equalStrings(got, c.wantReturned) {
+				t.Errorf("returned = %v, want %v", got, c.wantReturned)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestParseGlobalFlagsRejectsUnknown(t *testing.T) {
 	var out []byte
 	gotCode := withFakeExit(t, func() {

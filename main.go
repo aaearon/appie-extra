@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -494,7 +495,78 @@ func cmdBonusBox(ctx context.Context, args []string) {
 		emitError("upstream_failed", fmt.Sprintf("bonusbox request failed (date %s): %v", bonusDate, err), exitUpstreamError)
 	}
 
-	emitSuccess(decodeRawToAny(result), map[string]any{"bonusStartDate": bonusDate}, nil)
+	meta := map[string]any{"bonusStartDate": bonusDate}
+	var warnings []string
+
+	returned, mismatch := detectActivationMismatch(result, bonusDate)
+	if mismatch {
+		meta["activationMismatch"] = true
+		meta["returnedStartDate"] = returned[0]
+		if len(returned) > 1 {
+			meta["returnedStartDates"] = returned
+			warnings = append(warnings, fmt.Sprintf(
+				"requested bonusStartDate=%s but products carry %v; next week's box may not be activated yet",
+				bonusDate, returned))
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"requested bonusStartDate=%s but products carry %s; next week's box may not be activated yet",
+				bonusDate, returned[0]))
+		}
+	}
+
+	emitSuccess(decodeRawToAny(result), meta, warnings)
+}
+
+// detectActivationMismatch inspects a raw bonusbox response and reports the
+// unique non-null product-level bonusStartDate values. If any differ from
+// the requested date, mismatch=true and returned is the sorted unique list
+// of *non-requested* dates seen. If every product matches the requested
+// date (or no dates are present), returned is nil and mismatch is false.
+//
+// Schema (inferred from issue aaearon/appie-extra#3):
+//
+//	data.bonusGroupOrProducts[].bonusGroup.bonusStartDate
+//	data.bonusGroupOrProducts[].singleProduct.bonusStartDate
+//
+// Either field may be null per the issue's repro.
+func detectActivationMismatch(raw json.RawMessage, requested string) (returned []string, mismatch bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var parsed struct {
+		Data struct {
+			BonusGroupOrProducts []struct {
+				BonusGroup    *struct {
+					BonusStartDate *string `json:"bonusStartDate"`
+				} `json:"bonusGroup,omitempty"`
+				SingleProduct *struct {
+					BonusStartDate *string `json:"bonusStartDate"`
+				} `json:"singleProduct,omitempty"`
+			} `json:"bonusGroupOrProducts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, false
+	}
+
+	seen := map[string]struct{}{}
+	for _, item := range parsed.Data.BonusGroupOrProducts {
+		if item.BonusGroup != nil && item.BonusGroup.BonusStartDate != nil && *item.BonusGroup.BonusStartDate != requested {
+			seen[*item.BonusGroup.BonusStartDate] = struct{}{}
+		}
+		if item.SingleProduct != nil && item.SingleProduct.BonusStartDate != nil && *item.SingleProduct.BonusStartDate != requested {
+			seen[*item.SingleProduct.BonusStartDate] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil, false
+	}
+	returned = make([]string, 0, len(seen))
+	for d := range seen {
+		returned = append(returned, d)
+	}
+	sort.Strings(returned)
+	return returned, true
 }
 
 func cmdAddFreetext(ctx context.Context, args []string) {

@@ -246,15 +246,16 @@ func TestParseGlobalFlagsFlagBeforeCommand(t *testing.T) {
 
 func TestDetectActivationMismatch(t *testing.T) {
 	cases := []struct {
-		fixture       string
-		requested     string
-		wantReturned  []string
-		wantMismatch  bool
+		fixture      string
+		requested    string
+		wantAll      []string
+		wantMismatch []string
 	}{
-		{"testdata/bonusbox_match.json", "2026-05-25", nil, false},
-		{"testdata/bonusbox_single_mismatch.json", "2026-05-25", []string{"2026-05-18"}, true},
-		{"testdata/bonusbox_mixed_mismatch.json", "2026-05-25", []string{"2026-05-11", "2026-05-18"}, true},
-		{"testdata/bonusbox_empty.json", "2026-05-25", nil, false},
+		{"testdata/bonusbox_match.json", "2026-05-25", []string{"2026-05-25"}, nil},
+		{"testdata/bonusbox_single_mismatch.json", "2026-05-25", []string{"2026-05-18"}, []string{"2026-05-18"}},
+		{"testdata/bonusbox_mixed_mismatch.json", "2026-05-25", []string{"2026-05-11", "2026-05-18"}, []string{"2026-05-11", "2026-05-18"}},
+		{"testdata/bonusbox_partial_mismatch.json", "2026-05-25", []string{"2026-05-18", "2026-05-25"}, []string{"2026-05-18"}},
+		{"testdata/bonusbox_empty.json", "2026-05-25", nil, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.fixture, func(t *testing.T) {
@@ -262,12 +263,12 @@ func TestDetectActivationMismatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read fixture: %v", err)
 			}
-			got, mismatch := detectActivationMismatch(raw, c.requested)
-			if mismatch != c.wantMismatch {
-				t.Errorf("mismatch = %v, want %v", mismatch, c.wantMismatch)
+			gotAll, gotMismatch := detectActivationMismatch(raw, c.requested)
+			if !equalStrings(gotAll, c.wantAll) {
+				t.Errorf("allDates = %v, want %v", gotAll, c.wantAll)
 			}
-			if !equalStrings(got, c.wantReturned) {
-				t.Errorf("returned = %v, want %v", got, c.wantReturned)
+			if !equalStrings(gotMismatch, c.wantMismatch) {
+				t.Errorf("mismatchDates = %v, want %v", gotMismatch, c.wantMismatch)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -566,7 +567,97 @@ func cmdBonusBox(ctx context.Context, args []string) {
 		emitError("upstream_failed", fmt.Sprintf("bonusbox request failed (date %s): %v", bonusDate, err), exitUpstreamError)
 	}
 
-	emitSuccess(decodeRawToAny(result), map[string]any{"bonusStartDate": bonusDate}, nil)
+	meta := map[string]any{"bonusStartDate": bonusDate}
+	var warnings []string
+
+	allDates, mismatchDates := detectActivationMismatch(result, bonusDate)
+	if len(mismatchDates) > 0 {
+		meta["activationMismatch"] = true
+		// returnedStartDate = min of *all* non-null product dates so it
+		// accurately describes what week is present in the payload, even
+		// in the mixed case where requested + non-requested coexist.
+		meta["returnedStartDate"] = allDates[0]
+		// returnedStartDates lists only the *non-requested* dates — these
+		// are the values that flag the mismatch.
+		meta["returnedStartDates"] = mismatchDates
+		if len(mismatchDates) > 1 {
+			warnings = append(warnings, fmt.Sprintf(
+				"requested bonusStartDate=%s but products carry %v; next week's box may not be activated yet",
+				bonusDate, mismatchDates))
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"requested bonusStartDate=%s but products carry %s; next week's box may not be activated yet",
+				bonusDate, mismatchDates[0]))
+		}
+	}
+
+	emitSuccess(decodeRawToAny(result), meta, warnings)
+}
+
+// detectActivationMismatch inspects a raw bonusbox response and reports the
+// product-level bonusStartDate values it carries.
+//
+//   - allDates is the sorted unique list of all non-null product-level
+//     bonusStartDate values seen (including ones equal to requested).
+//   - mismatchDates is the sorted unique list of dates that DIFFER from
+//     requested. If non-empty, the bonusbox is showing the wrong week.
+//
+// Returning both views lets the caller surface "what week is in the
+// payload" (min of allDates) separately from "what unexpected dates do
+// we see" (mismatchDates).
+//
+// Schema (inferred from issue aaearon/appie-extra#3):
+//
+//	data.bonusGroupOrProducts[].bonusGroup.bonusStartDate
+//	data.bonusGroupOrProducts[].singleProduct.bonusStartDate
+//
+// Either field may be null per the issue's repro.
+func detectActivationMismatch(raw json.RawMessage, requested string) (allDates, mismatchDates []string) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var parsed struct {
+		Data struct {
+			BonusGroupOrProducts []struct {
+				BonusGroup *struct {
+					BonusStartDate *string `json:"bonusStartDate"`
+				} `json:"bonusGroup,omitempty"`
+				SingleProduct *struct {
+					BonusStartDate *string `json:"bonusStartDate"`
+				} `json:"singleProduct,omitempty"`
+			} `json:"bonusGroupOrProducts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, nil
+	}
+
+	all := map[string]struct{}{}
+	collect := func(d *string) {
+		if d != nil && *d != "" {
+			all[*d] = struct{}{}
+		}
+	}
+	for _, item := range parsed.Data.BonusGroupOrProducts {
+		if item.BonusGroup != nil {
+			collect(item.BonusGroup.BonusStartDate)
+		}
+		if item.SingleProduct != nil {
+			collect(item.SingleProduct.BonusStartDate)
+		}
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	for d := range all {
+		allDates = append(allDates, d)
+		if d != requested {
+			mismatchDates = append(mismatchDates, d)
+		}
+	}
+	sort.Strings(allDates)
+	sort.Strings(mismatchDates)
+	return allDates, mismatchDates
 }
 
 func cmdAddFreetext(ctx context.Context, args []string) {

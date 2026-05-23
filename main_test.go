@@ -245,6 +245,48 @@ func TestParseGlobalFlagsFlagBeforeCommand(t *testing.T) {
 	}
 }
 
+func TestDetectActivationMismatch(t *testing.T) {
+	cases := []struct {
+		fixture      string
+		requested    string
+		wantAll      []string
+		wantMismatch []string
+	}{
+		{"testdata/bonusbox_match.json", "2026-05-25", []string{"2026-05-25"}, nil},
+		{"testdata/bonusbox_single_mismatch.json", "2026-05-25", []string{"2026-05-18"}, []string{"2026-05-18"}},
+		{"testdata/bonusbox_mixed_mismatch.json", "2026-05-25", []string{"2026-05-11", "2026-05-18"}, []string{"2026-05-11", "2026-05-18"}},
+		{"testdata/bonusbox_partial_mismatch.json", "2026-05-25", []string{"2026-05-18", "2026-05-25"}, []string{"2026-05-18"}},
+		{"testdata/bonusbox_empty.json", "2026-05-25", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.fixture, func(t *testing.T) {
+			raw, err := os.ReadFile(c.fixture)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			gotAll, gotMismatch := detectActivationMismatch(raw, c.requested)
+			if !equalStrings(gotAll, c.wantAll) {
+				t.Errorf("allDates = %v, want %v", gotAll, c.wantAll)
+			}
+			if !equalStrings(gotMismatch, c.wantMismatch) {
+				t.Errorf("mismatchDates = %v, want %v", gotMismatch, c.wantMismatch)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestParseGlobalFlagsRejectsUnknown(t *testing.T) {
 	var out []byte
 	gotCode := withFakeExit(t, func() {

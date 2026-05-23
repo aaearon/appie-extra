@@ -295,7 +295,7 @@ func TestSelectPeriods(t *testing.T) {
 		{Start: "2026-05-18", End: "2026-05-25", NextPeriodVisibleFrom: "2026-05-22T00:00:00Z"},
 		{Start: "2026-05-26", End: "2026-05-31", NextPeriodVisibleFrom: "2026-05-29T00:00:00Z"},
 	}
-	today := func() string { return "2026-05-23" }
+	const today = "2026-05-23"
 
 	t.Run("all returns full list as array", func(t *testing.T) {
 		items, single, code, _ := selectPeriods(periods, "all", today)
@@ -359,6 +359,20 @@ func TestSelectPeriods(t *testing.T) {
 			t.Errorf("got code=%q, want no_period", code)
 		}
 	})
+}
+
+// today() must compute the calendar date in Europe/Amsterdam, not the
+// process-local TZ — AH bonus periods are keyed to Dutch local dates and
+// the CLI runs from arbitrary timezones.
+func TestTodayUsesAmsterdamTimezone(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	want := time.Now().In(loc).Format("2006-01-02")
+	if got := today(); got != want {
+		t.Errorf("today() = %q, want %q (Europe/Amsterdam)", got, want)
+	}
 }
 
 func TestParseGlobalFlagsRejectsUnknown(t *testing.T) {

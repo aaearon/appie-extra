@@ -454,8 +454,18 @@ func parseBonusDateArg(args []string, defaultDate func() string) (date string, r
 	return defaultDate(), args
 }
 
+// ahLocation is the timezone AH uses to key bonus periods. Initialized
+// once at startup; falls back to UTC if the tzdata is unavailable.
+var ahLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
+
 func today() string {
-	return time.Now().Format("2006-01-02")
+	return time.Now().In(ahLocation).Format("2006-01-02")
 }
 
 func cmdBonusProducts(ctx context.Context, args []string) {
@@ -578,7 +588,7 @@ func cmdBonusBox(ctx context.Context, args []string) {
 	if !ok {
 		emitError("no_period",
 			fmt.Sprintf("no bonus period covers %q; AH returned %v", requested, periodSummary(periods)),
-			exitUserError)
+			exitNotFound)
 		return
 	}
 
@@ -680,25 +690,25 @@ func periodSummary(periods []bonusPeriod) []string {
 
 // selectPeriods resolves the `periods` subcommand arg into either the full
 // list (for "all") or a single matching period. Returns a non-empty errCode
-// when the arg is unrecognized or no period matches. todayFn is a hook so
-// tests can pin "today" without time.Now().
-func selectPeriods(periods []bonusPeriod, arg string, todayFn func() string) (items []bonusPeriod, single bool, errCode, errMsg string) {
+// when the arg is unrecognized or no period matches. Caller passes a fixed
+// "today" string so selection and metadata can't disagree across a midnight
+// boundary.
+func selectPeriods(periods []bonusPeriod, arg, today string) (items []bonusPeriod, single bool, errCode, errMsg string) {
 	switch arg {
 	case "all":
 		return periods, false, "", ""
 	case "current":
-		t := todayFn()
-		if p, ok := pickPeriodContaining(periods, t); ok {
+		if p, ok := pickPeriodContaining(periods, today); ok {
 			return []bonusPeriod{p}, true, "", ""
 		}
 		return nil, true, "no_period",
-			fmt.Sprintf("no bonus period covers today %q; AH returned %v", t, periodSummary(periods))
+			fmt.Sprintf("no bonus period covers today %q; AH returned %v", today, periodSummary(periods))
 	case "next":
-		if p, ok := pickNextPeriod(periods, todayFn()); ok {
+		if p, ok := pickNextPeriod(periods, today); ok {
 			return []bonusPeriod{p}, true, "", ""
 		}
 		return nil, true, "no_period",
-			fmt.Sprintf("no bonus period after today %q; AH returned %v", todayFn(), periodSummary(periods))
+			fmt.Sprintf("no bonus period after today %q; AH returned %v", today, periodSummary(periods))
 	}
 	if _, err := time.Parse("2006-01-02", arg); err != nil {
 		return nil, false, "unexpected_arg",
@@ -727,7 +737,8 @@ func cmdPeriods(ctx context.Context, args []string) {
 		return
 	}
 
-	items, single, errCode, errMsg := selectPeriods(periods, arg, today)
+	t := today()
+	items, single, errCode, errMsg := selectPeriods(periods, arg, t)
 	if errCode != "" {
 		exit := exitUserError
 		if errCode == "no_period" {
@@ -737,7 +748,7 @@ func cmdPeriods(ctx context.Context, args []string) {
 		return
 	}
 
-	meta := map[string]any{"today": today(), "count": len(items)}
+	meta := map[string]any{"today": t, "count": len(items)}
 	if single {
 		emitSuccess(items[0], meta, nil)
 		return

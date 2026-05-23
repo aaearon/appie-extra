@@ -245,46 +245,49 @@ func TestParseGlobalFlagsFlagBeforeCommand(t *testing.T) {
 	}
 }
 
-func TestDetectActivationMismatch(t *testing.T) {
+func TestPickPeriodContaining(t *testing.T) {
+	// Mirrors a real holiday-shifted AH response: the "current" period
+	// is extended through Whit Monday (May 25), and the next period
+	// starts on a Tuesday.
+	periods := []bonusPeriod{
+		{Start: "2026-05-18", End: "2026-05-25"},
+		{Start: "2026-05-26", End: "2026-05-31"},
+	}
 	cases := []struct {
-		fixture      string
-		requested    string
-		wantAll      []string
-		wantMismatch []string
+		name, in, wantS, wantE string
+		wantOK                 bool
 	}{
-		{"testdata/bonusbox_match.json", "2026-05-25", []string{"2026-05-25"}, nil},
-		{"testdata/bonusbox_single_mismatch.json", "2026-05-25", []string{"2026-05-18"}, []string{"2026-05-18"}},
-		{"testdata/bonusbox_mixed_mismatch.json", "2026-05-25", []string{"2026-05-11", "2026-05-18"}, []string{"2026-05-11", "2026-05-18"}},
-		{"testdata/bonusbox_partial_mismatch.json", "2026-05-25", []string{"2026-05-18", "2026-05-25"}, []string{"2026-05-18"}},
-		{"testdata/bonusbox_empty.json", "2026-05-25", nil, nil},
+		{"start of current", "2026-05-18", "2026-05-18", "2026-05-25", true},
+		{"holiday boundary day", "2026-05-25", "2026-05-18", "2026-05-25", true},
+		{"start of next", "2026-05-26", "2026-05-26", "2026-05-31", true},
+		{"end of next", "2026-05-31", "2026-05-26", "2026-05-31", true},
+		{"before all", "2026-05-01", "", "", false},
+		{"after all", "2026-06-15", "", "", false},
 	}
 	for _, c := range cases {
-		t.Run(c.fixture, func(t *testing.T) {
-			raw, err := os.ReadFile(c.fixture)
-			if err != nil {
-				t.Fatalf("read fixture: %v", err)
-			}
-			gotAll, gotMismatch := detectActivationMismatch(raw, c.requested)
-			if !equalStrings(gotAll, c.wantAll) {
-				t.Errorf("allDates = %v, want %v", gotAll, c.wantAll)
-			}
-			if !equalStrings(gotMismatch, c.wantMismatch) {
-				t.Errorf("mismatchDates = %v, want %v", gotMismatch, c.wantMismatch)
+		t.Run(c.name, func(t *testing.T) {
+			s, e, ok := pickPeriodContaining(periods, c.in)
+			if ok != c.wantOK || s != c.wantS || e != c.wantE {
+				t.Errorf("got (%q, %q, %v); want (%q, %q, %v)", s, e, ok, c.wantS, c.wantE, c.wantOK)
 			}
 		})
 	}
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+func TestPickNextPeriod(t *testing.T) {
+	periods := []bonusPeriod{
+		{Start: "2026-05-18", End: "2026-05-25"},
+		{Start: "2026-05-26", End: "2026-05-31"},
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+	if s, e, ok := pickNextPeriod(periods, "2026-05-23"); !ok || s != "2026-05-26" || e != "2026-05-31" {
+		t.Errorf("next from 2026-05-23: got (%q, %q, %v); want (2026-05-26, 2026-05-31, true)", s, e, ok)
 	}
-	return true
+	if _, _, ok := pickNextPeriod(periods, "2026-05-26"); ok {
+		t.Errorf("next from start of last published period should report no next; metadata likely needs to advance first")
+	}
+	if _, _, ok := pickNextPeriod(nil, "2026-05-23"); ok {
+		t.Errorf("next on empty periods should not find a match")
+	}
 }
 
 func TestParseGlobalFlagsRejectsUnknown(t *testing.T) {
@@ -317,12 +320,16 @@ func TestParseBonusDateArg(t *testing.T) {
 
 	t.Run("next consumes arg", func(t *testing.T) {
 		date, rest := parseBonusDateArg([]string{"next"}, fixed)
-		want, err := time.Parse("2006-01-02", date)
+		got, err := time.Parse("2006-01-02", date)
 		if err != nil {
 			t.Fatalf("returned date %q not parseable: %v", date, err)
 		}
-		if want.Weekday() != time.Sunday {
-			t.Errorf("next should resolve to a Sunday, got %s (%s)", date, want.Weekday())
+		// "next" is just a hint that resolves to ~7 days out; the
+		// caller pairs it with AH metadata to land on the real next
+		// bonus period (holidays shift the week boundary).
+		diff := int(time.Until(got).Hours() / 24)
+		if diff < 6 || diff > 8 {
+			t.Errorf("next should be ~7 days from now, got %d days (%s)", diff, date)
 		}
 		if len(rest) != 0 {
 			t.Errorf("rest = %v, want empty", rest)

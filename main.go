@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -430,20 +429,20 @@ func cmdRecipe(ctx context.Context, args []string) {
 // unparseable arg (10 chars, two dashes) is rejected with bad_args — AH
 // would reject it upstream anyway and failing fast is more useful.
 //
+// "next" returns a date roughly one week from now. The caller is expected
+// to resolve it against AH's actual bonus-period metadata (week starts
+// shift around Dutch holidays — Pasen, Pinksteren, Koningsdag — so we
+// can't assume Monday-start). Use this only as a hint to mean "the period
+// after the current one".
+//
 // defaultDate computes the date to use when no explicit date arg is given.
-// Callers differ on the default: bonus-products uses today, bonusbox uses
-// today's Sunday. The empty-string sentinel that appie-go's getBonusSection
-// recognizes is never used through this path — appie-extra always passes an
-// explicit date to the library.
 func parseBonusDateArg(args []string, defaultDate func() string) (date string, rest []string) {
 	if len(args) == 0 {
 		return defaultDate(), args
 	}
 	first := args[0]
 	if first == "next" {
-		now := time.Now()
-		daysSinceSun := int(now.Weekday())
-		return now.AddDate(0, 0, -daysSinceSun+7).Format("2006-01-02"), args[1:]
+		return time.Now().AddDate(0, 0, 7).Format("2006-01-02"), args[1:]
 	}
 	if len(first) == 10 && strings.Count(first, "-") == 2 {
 		if _, err := time.Parse("2006-01-02", first); err != nil {
@@ -457,12 +456,6 @@ func parseBonusDateArg(args []string, defaultDate func() string) (date string, r
 
 func today() string {
 	return time.Now().Format("2006-01-02")
-}
-
-func currentSunday() string {
-	now := time.Now()
-	daysSinceSun := int(now.Weekday())
-	return now.AddDate(0, 0, -daysSinceSun).Format("2006-01-02")
 }
 
 func cmdBonusProducts(ctx context.Context, args []string) {
@@ -555,108 +548,162 @@ func cmdBonusBox(ctx context.Context, args []string) {
 	requireAtMostArgs(args, 1, "appie-extra bonusbox [next|YYYY-MM-DD]")
 	client := mustAuthOrEmit(ctx)
 
-	bonusDate, rest := parseBonusDateArg(args, currentSunday)
+	// "next" needs to resolve against AH metadata (period after the
+	// current one); capture intent before parseBonusDateArg consumes it.
+	wantNext := len(args) > 0 && args[0] == "next"
+	requested, rest := parseBonusDateArg(args, today)
 	if len(rest) > 0 {
 		emitError("unexpected_arg", fmt.Sprintf("unexpected argument: %q; usage: appie-extra bonusbox [next|YYYY-MM-DD]", rest[0]), exitUserError)
 		return
 	}
 
-	var result json.RawMessage
-	ep := "/mobile-services/bonuspage/v1/personal?bonusStartDate=" + bonusDate
-	if err := client.DoRequest(ctx, "GET", ep, nil, &result); err != nil {
-		emitError("upstream_failed", fmt.Sprintf("bonusbox request failed (date %s): %v", bonusDate, err), exitUpstreamError)
+	periods, err := fetchBonusPeriods(ctx, client)
+	if err != nil {
+		emitError("upstream_failed", fmt.Sprintf("bonus metadata failed: %v", err), exitUpstreamError)
+		return
+	}
+	if len(periods) == 0 {
+		emitError("upstream_failed", "no bonus periods returned by AH metadata", exitUpstreamError)
+		return
 	}
 
-	meta := map[string]any{"bonusStartDate": bonusDate}
-	var warnings []string
-
-	allDates, mismatchDates := detectActivationMismatch(result, bonusDate)
-	if len(mismatchDates) > 0 {
-		meta["activationMismatch"] = true
-		// returnedStartDate = min of *all* non-null product dates so it
-		// accurately describes what week is present in the payload, even
-		// in the mixed case where requested + non-requested coexist.
-		meta["returnedStartDate"] = allDates[0]
-		// returnedStartDates lists only the *non-requested* dates — these
-		// are the values that flag the mismatch.
-		meta["returnedStartDates"] = mismatchDates
-		if len(mismatchDates) > 1 {
-			warnings = append(warnings, fmt.Sprintf(
-				"requested bonusStartDate=%s but products carry %v; next week's box may not be activated yet",
-				bonusDate, mismatchDates))
-		} else {
-			warnings = append(warnings, fmt.Sprintf(
-				"requested bonusStartDate=%s but products carry %s; next week's box may not be activated yet",
-				bonusDate, mismatchDates[0]))
-		}
+	var pStart, pEnd string
+	var ok bool
+	if wantNext {
+		pStart, pEnd, ok = pickNextPeriod(periods, today())
+	} else {
+		pStart, pEnd, ok = pickPeriodContaining(periods, requested)
+	}
+	if !ok {
+		emitError("no_period",
+			fmt.Sprintf("no bonus period covers %q; AH returned %v", requested, periodSummary(periods)),
+			exitUserError)
+		return
 	}
 
-	emitSuccess(decodeRawToAny(result), meta, warnings)
+	vars := map[string]any{
+		"filterSet":                 "APP_BONUS_BOX",
+		"periodStart":               pStart,
+		"periodEnd":                 pEnd,
+		"states":                    []string{"ACTIVATABLE", "ACTIVATED"},
+		"forcePromotionVisibility":  true,
+		"filterUnavailableProducts": false,
+	}
+	var resp struct {
+		Bundles []struct {
+			MaximumActivations int `json:"maximumActivations"`
+		} `json:"bonusPersonalPromotionBundles"`
+		BonusPromotions json.RawMessage `json:"bonusPromotions"`
+	}
+	if err := client.DoGraphQL(ctx, fetchBonusBoxOffersQuery, vars, &resp); err != nil {
+		emitError("upstream_failed", fmt.Sprintf("bonusbox query failed (period %s..%s): %v", pStart, pEnd, err), exitUpstreamError)
+		return
+	}
+
+	meta := map[string]any{
+		"periodStart": pStart,
+		"periodEnd":   pEnd,
+	}
+	if len(resp.Bundles) > 0 {
+		meta["maximumActivations"] = resp.Bundles[0].MaximumActivations
+	}
+	emitSuccess(decodeRawToAny(resp.BonusPromotions), meta, nil)
 }
 
-// detectActivationMismatch inspects a raw bonusbox response and reports the
-// product-level bonusStartDate values it carries.
-//
-//   - allDates is the sorted unique list of all non-null product-level
-//     bonusStartDate values seen (including ones equal to requested).
-//   - mismatchDates is the sorted unique list of dates that DIFFER from
-//     requested. If non-empty, the bonusbox is showing the wrong week.
-//
-// Returning both views lets the caller surface "what week is in the
-// payload" (min of allDates) separately from "what unexpected dates do
-// we see" (mismatchDates).
-//
-// Schema (AH /mobile-services/bonuspage/v1/personal response):
-//
-//	bonusGroupOrProducts[].bonusGroup.bonusStartDate
-//	bonusGroupOrProducts[].singleProduct.bonusStartDate
-//
-// Either field may be null per the issue's repro.
-func detectActivationMismatch(raw json.RawMessage, requested string) (allDates, mismatchDates []string) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	var parsed struct {
-		BonusGroupOrProducts []struct {
-			BonusGroup *struct {
-				BonusStartDate *string `json:"bonusStartDate"`
-			} `json:"bonusGroup,omitempty"`
-			SingleProduct *struct {
-				BonusStartDate *string `json:"bonusStartDate"`
-			} `json:"singleProduct,omitempty"`
-		} `json:"bonusGroupOrProducts"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, nil
-	}
+// bonusPeriod is a single bonus-week range as returned by AH metadata.
+// Boundaries shift around Dutch public holidays (Pasen, Pinksteren,
+// Koningsdag), so callers must not assume Monday-start or 7-day length.
+type bonusPeriod struct{ Start, End string }
 
-	all := map[string]struct{}{}
-	collect := func(d *string) {
-		if d != nil && *d != "" {
-			all[*d] = struct{}{}
-		}
+func fetchBonusPeriods(ctx context.Context, client *appie.Client) ([]bonusPeriod, error) {
+	var meta struct {
+		Periods []struct {
+			BonusStartDate string `json:"bonusStartDate"`
+			BonusEndDate   string `json:"bonusEndDate"`
+		} `json:"periods"`
 	}
-	for _, item := range parsed.BonusGroupOrProducts {
-		if item.BonusGroup != nil {
-			collect(item.BonusGroup.BonusStartDate)
-		}
-		if item.SingleProduct != nil {
-			collect(item.SingleProduct.BonusStartDate)
-		}
+	if err := client.DoRequest(ctx, "GET", "/mobile-services/bonuspage/v3/metadata", nil, &meta); err != nil {
+		return nil, err
 	}
-	if len(all) == 0 {
-		return nil, nil
+	out := make([]bonusPeriod, 0, len(meta.Periods))
+	for _, p := range meta.Periods {
+		out = append(out, bonusPeriod{Start: p.BonusStartDate, End: p.BonusEndDate})
 	}
-	for d := range all {
-		allDates = append(allDates, d)
-		if d != requested {
-			mismatchDates = append(mismatchDates, d)
-		}
-	}
-	sort.Strings(allDates)
-	sort.Strings(mismatchDates)
-	return allDates, mismatchDates
+	return out, nil
 }
+
+// pickPeriodContaining returns the period whose [Start, End] inclusive
+// range contains the date. Dates are ISO YYYY-MM-DD so string comparison
+// is order-correct.
+func pickPeriodContaining(periods []bonusPeriod, date string) (start, end string, ok bool) {
+	for _, p := range periods {
+		if date >= p.Start && date <= p.End {
+			return p.Start, p.End, true
+		}
+	}
+	return "", "", false
+}
+
+// pickNextPeriod returns the earliest period that starts strictly after
+// today — i.e., the period after the one currently running.
+func pickNextPeriod(periods []bonusPeriod, today string) (start, end string, ok bool) {
+	var bestStart, bestEnd string
+	for _, p := range periods {
+		if p.Start > today && (bestStart == "" || p.Start < bestStart) {
+			bestStart, bestEnd = p.Start, p.End
+		}
+	}
+	if bestStart == "" {
+		return "", "", false
+	}
+	return bestStart, bestEnd, true
+}
+
+func periodSummary(periods []bonusPeriod) []string {
+	out := make([]string, 0, len(periods))
+	for _, p := range periods {
+		out = append(out, p.Start+".."+p.End)
+	}
+	return out
+}
+
+const fetchBonusBoxOffersQuery = `query FetchBonusBoxOffers(
+  $filterSet: PromotionsFilterSet,
+  $periodStart: String,
+  $periodEnd: String,
+  $forcePromotionVisibility: Boolean = true,
+  $filterUnavailableProducts: Boolean = false,
+  $states: [BonusSegmentState!]
+) {
+  bonusPersonalPromotionBundles(validOn: $periodStart) {
+    maximumActivations
+  }
+  bonusPromotions(
+    filterSet: $filterSet
+    input: {
+      periodStart: $periodStart
+      periodEnd: $periodEnd
+      filterUnavailableProducts: $filterUnavailableProducts
+      forcePromotionVisibility: $forcePromotionVisibility
+      states: $states
+    }
+  ) {
+    id
+    hqId
+    title
+    activationStatus
+    category
+    promotionType
+    segmentType
+    periodStart
+    periodEnd
+    rawPromotionLabels { mechanism price defaultDescription }
+    price {
+      now { amount }
+      was { amount }
+    }
+  }
+}`
 
 func cmdAddFreetext(ctx context.Context, args []string) {
 	requireAtLeastArgs(args, 1, "appie-extra add-freetext <text> [quantity]")

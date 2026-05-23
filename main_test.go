@@ -266,9 +266,9 @@ func TestPickPeriodContaining(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s, e, ok := pickPeriodContaining(periods, c.in)
-			if ok != c.wantOK || s != c.wantS || e != c.wantE {
-				t.Errorf("got (%q, %q, %v); want (%q, %q, %v)", s, e, ok, c.wantS, c.wantE, c.wantOK)
+			p, ok := pickPeriodContaining(periods, c.in)
+			if ok != c.wantOK || p.Start != c.wantS || p.End != c.wantE {
+				t.Errorf("got (%q, %q, %v); want (%q, %q, %v)", p.Start, p.End, ok, c.wantS, c.wantE, c.wantOK)
 			}
 		})
 	}
@@ -279,14 +279,99 @@ func TestPickNextPeriod(t *testing.T) {
 		{Start: "2026-05-18", End: "2026-05-25"},
 		{Start: "2026-05-26", End: "2026-05-31"},
 	}
-	if s, e, ok := pickNextPeriod(periods, "2026-05-23"); !ok || s != "2026-05-26" || e != "2026-05-31" {
-		t.Errorf("next from 2026-05-23: got (%q, %q, %v); want (2026-05-26, 2026-05-31, true)", s, e, ok)
+	if p, ok := pickNextPeriod(periods, "2026-05-23"); !ok || p.Start != "2026-05-26" || p.End != "2026-05-31" {
+		t.Errorf("next from 2026-05-23: got (%q, %q, %v); want (2026-05-26, 2026-05-31, true)", p.Start, p.End, ok)
 	}
-	if _, _, ok := pickNextPeriod(periods, "2026-05-26"); ok {
+	if _, ok := pickNextPeriod(periods, "2026-05-26"); ok {
 		t.Errorf("next from start of last published period should report no next; metadata likely needs to advance first")
 	}
-	if _, _, ok := pickNextPeriod(nil, "2026-05-23"); ok {
+	if _, ok := pickNextPeriod(nil, "2026-05-23"); ok {
 		t.Errorf("next on empty periods should not find a match")
+	}
+}
+
+func TestSelectPeriods(t *testing.T) {
+	periods := []bonusPeriod{
+		{Start: "2026-05-18", End: "2026-05-25", NextPeriodVisibleFrom: "2026-05-22T00:00:00Z"},
+		{Start: "2026-05-26", End: "2026-05-31", NextPeriodVisibleFrom: "2026-05-29T00:00:00Z"},
+	}
+	const today = "2026-05-23"
+
+	t.Run("all returns full list as array", func(t *testing.T) {
+		items, single, code, _ := selectPeriods(periods, "all", today)
+		if code != "" {
+			t.Fatalf("unexpected error: %s", code)
+		}
+		if single {
+			t.Errorf("all should emit as array, not single")
+		}
+		if len(items) != 2 {
+			t.Errorf("got %d items, want 2", len(items))
+		}
+	})
+
+	t.Run("current picks period containing today", func(t *testing.T) {
+		items, single, code, _ := selectPeriods(periods, "current", today)
+		if code != "" {
+			t.Fatalf("unexpected error: %s", code)
+		}
+		if !single || len(items) != 1 || items[0].Start != "2026-05-18" {
+			t.Errorf("got items=%v single=%v; want current period as single", items, single)
+		}
+		if items[0].NextPeriodVisibleFrom == "" {
+			t.Errorf("expected NextPeriodVisibleFrom to flow through; got empty")
+		}
+	})
+
+	t.Run("next picks earliest period after today", func(t *testing.T) {
+		items, single, code, _ := selectPeriods(periods, "next", today)
+		if code != "" {
+			t.Fatalf("unexpected error: %s", code)
+		}
+		if !single || len(items) != 1 || items[0].Start != "2026-05-26" {
+			t.Errorf("got items=%v single=%v; want next period as single", items, single)
+		}
+	})
+
+	t.Run("explicit date picks containing period", func(t *testing.T) {
+		items, single, code, _ := selectPeriods(periods, "2026-05-28", today)
+		if code != "" {
+			t.Fatalf("unexpected error: %s", code)
+		}
+		if !single || len(items) != 1 || items[0].Start != "2026-05-26" {
+			t.Errorf("got items=%v single=%v; want 2026-05-26..31 as single", items, single)
+		}
+	})
+
+	t.Run("unknown arg rejected", func(t *testing.T) {
+		items, _, code, _ := selectPeriods(periods, "bogus", today)
+		if code != "unexpected_arg" {
+			t.Errorf("got code=%q, want unexpected_arg", code)
+		}
+		if items != nil {
+			t.Errorf("got items=%v, want nil", items)
+		}
+	})
+
+	t.Run("date with no matching period reports no_period", func(t *testing.T) {
+		_, _, code, _ := selectPeriods(periods, "2026-06-15", today)
+		if code != "no_period" {
+			t.Errorf("got code=%q, want no_period", code)
+		}
+	})
+}
+
+// today() must compute the calendar date in Europe/Amsterdam, not the
+// process-local TZ — AH bonus periods are keyed to Dutch local dates and
+// the CLI runs from arbitrary timezones.
+func TestTodayUsesAmsterdamTimezone(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	want := time.Now().In(loc).Format("2006-01-02")
+	if got := today(); got != want {
+		t.Errorf("today() = %q, want %q (Europe/Amsterdam)", got, want)
 	}
 }
 

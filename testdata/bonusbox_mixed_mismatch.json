@@ -1,10 +1,8 @@
 {
-  "data": {
-    "bonusGroupOrProducts": [
-      {"bonusGroup":   {"bonusStartDate": "2026-05-11","id": "g1"}},
-      {"singleProduct":{"bonusStartDate": "2026-05-18","id": 10}},
-      {"singleProduct":{"bonusStartDate": "2026-05-18","id": 11}},
-      {"bonusGroup":   {"bonusStartDate": "2026-05-11","id": "g2"}}
-    ]
-  }
+  "bonusGroupOrProducts": [
+    {"bonusGroup":   {"bonusStartDate": "2026-05-11","id": "g1"}},
+    {"singleProduct":{"bonusStartDate": "2026-05-18","id": 10}},
+    {"singleProduct":{"bonusStartDate": "2026-05-18","id": 11}},
+    {"bonusGroup":   {"bonusStartDate": "2026-05-11","id": "g2"}}
+  ]
 }

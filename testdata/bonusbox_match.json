@@ -1,9 +1,7 @@
 {
-  "data": {
-    "bonusGroupOrProducts": [
-      {"bonusGroup":   {"bonusStartDate": "2026-05-25", "id": "g1"}},
-      {"singleProduct":{"bonusStartDate": "2026-05-25", "id": 10}},
-      {"singleProduct":{"bonusStartDate": "2026-05-25", "id": 11}}
-    ]
-  }
+  "bonusGroupOrProducts": [
+    {"bonusGroup":   {"bonusStartDate": "2026-05-25", "id": "g1"}},
+    {"singleProduct":{"bonusStartDate": "2026-05-25", "id": 10}},
+    {"singleProduct":{"bonusStartDate": "2026-05-25", "id": 11}}
+  ]
 }

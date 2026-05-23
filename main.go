@@ -606,10 +606,10 @@ func cmdBonusBox(ctx context.Context, args []string) {
 // payload" (min of allDates) separately from "what unexpected dates do
 // we see" (mismatchDates).
 //
-// Schema (inferred from issue aaearon/appie-extra#3):
+// Schema (AH /mobile-services/bonuspage/v1/personal response):
 //
-//	data.bonusGroupOrProducts[].bonusGroup.bonusStartDate
-//	data.bonusGroupOrProducts[].singleProduct.bonusStartDate
+//	bonusGroupOrProducts[].bonusGroup.bonusStartDate
+//	bonusGroupOrProducts[].singleProduct.bonusStartDate
 //
 // Either field may be null per the issue's repro.
 func detectActivationMismatch(raw json.RawMessage, requested string) (allDates, mismatchDates []string) {
@@ -617,16 +617,14 @@ func detectActivationMismatch(raw json.RawMessage, requested string) (allDates, 
 		return nil, nil
 	}
 	var parsed struct {
-		Data struct {
-			BonusGroupOrProducts []struct {
-				BonusGroup *struct {
-					BonusStartDate *string `json:"bonusStartDate"`
-				} `json:"bonusGroup,omitempty"`
-				SingleProduct *struct {
-					BonusStartDate *string `json:"bonusStartDate"`
-				} `json:"singleProduct,omitempty"`
-			} `json:"bonusGroupOrProducts"`
-		} `json:"data"`
+		BonusGroupOrProducts []struct {
+			BonusGroup *struct {
+				BonusStartDate *string `json:"bonusStartDate"`
+			} `json:"bonusGroup,omitempty"`
+			SingleProduct *struct {
+				BonusStartDate *string `json:"bonusStartDate"`
+			} `json:"singleProduct,omitempty"`
+		} `json:"bonusGroupOrProducts"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, nil
@@ -638,7 +636,7 @@ func detectActivationMismatch(raw json.RawMessage, requested string) (allDates, 
 			all[*d] = struct{}{}
 		}
 	}
-	for _, item := range parsed.Data.BonusGroupOrProducts {
+	for _, item := range parsed.BonusGroupOrProducts {
 		if item.BonusGroup != nil {
 			collect(item.BonusGroup.BonusStartDate)
 		}

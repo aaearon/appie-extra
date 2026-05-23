@@ -567,13 +567,14 @@ func cmdBonusBox(ctx context.Context, args []string) {
 		return
 	}
 
-	var pStart, pEnd string
+	var p bonusPeriod
 	var ok bool
 	if wantNext {
-		pStart, pEnd, ok = pickNextPeriod(periods, today())
+		p, ok = pickNextPeriod(periods, today())
 	} else {
-		pStart, pEnd, ok = pickPeriodContaining(periods, requested)
+		p, ok = pickPeriodContaining(periods, requested)
 	}
+	pStart, pEnd := p.Start, p.End
 	if !ok {
 		emitError("no_period",
 			fmt.Sprintf("no bonus period covers %q; AH returned %v", requested, periodSummary(periods)),
@@ -613,13 +614,20 @@ func cmdBonusBox(ctx context.Context, args []string) {
 // bonusPeriod is a single bonus-week range as returned by AH metadata.
 // Boundaries shift around Dutch public holidays (Pasen, Pinksteren,
 // Koningsdag), so callers must not assume Monday-start or 7-day length.
-type bonusPeriod struct{ Start, End string }
+// JSON tags match the AH wire shape so the struct emits cleanly from the
+// `periods` subcommand.
+type bonusPeriod struct {
+	Start                 string `json:"bonusStartDate"`
+	End                   string `json:"bonusEndDate"`
+	NextPeriodVisibleFrom string `json:"nextPeriodVisibleFrom,omitempty"`
+}
 
 func fetchBonusPeriods(ctx context.Context, client *appie.Client) ([]bonusPeriod, error) {
 	var meta struct {
 		Periods []struct {
-			BonusStartDate string `json:"bonusStartDate"`
-			BonusEndDate   string `json:"bonusEndDate"`
+			BonusStartDate        string `json:"bonusStartDate"`
+			BonusEndDate          string `json:"bonusEndDate"`
+			NextPeriodVisibleFrom string `json:"nextPeriodVisibleFrom"`
 		} `json:"periods"`
 	}
 	if err := client.DoRequest(ctx, "GET", "/mobile-services/bonuspage/v3/metadata", nil, &meta); err != nil {
@@ -627,7 +635,11 @@ func fetchBonusPeriods(ctx context.Context, client *appie.Client) ([]bonusPeriod
 	}
 	out := make([]bonusPeriod, 0, len(meta.Periods))
 	for _, p := range meta.Periods {
-		out = append(out, bonusPeriod{Start: p.BonusStartDate, End: p.BonusEndDate})
+		out = append(out, bonusPeriod{
+			Start:                 p.BonusStartDate,
+			End:                   p.BonusEndDate,
+			NextPeriodVisibleFrom: p.NextPeriodVisibleFrom,
+		})
 	}
 	return out, nil
 }
@@ -635,28 +647,27 @@ func fetchBonusPeriods(ctx context.Context, client *appie.Client) ([]bonusPeriod
 // pickPeriodContaining returns the period whose [Start, End] inclusive
 // range contains the date. Dates are ISO YYYY-MM-DD so string comparison
 // is order-correct.
-func pickPeriodContaining(periods []bonusPeriod, date string) (start, end string, ok bool) {
+func pickPeriodContaining(periods []bonusPeriod, date string) (bonusPeriod, bool) {
 	for _, p := range periods {
 		if date >= p.Start && date <= p.End {
-			return p.Start, p.End, true
+			return p, true
 		}
 	}
-	return "", "", false
+	return bonusPeriod{}, false
 }
 
 // pickNextPeriod returns the earliest period that starts strictly after
 // today — i.e., the period after the one currently running.
-func pickNextPeriod(periods []bonusPeriod, today string) (start, end string, ok bool) {
-	var bestStart, bestEnd string
+func pickNextPeriod(periods []bonusPeriod, today string) (bonusPeriod, bool) {
+	var best bonusPeriod
+	var found bool
 	for _, p := range periods {
-		if p.Start > today && (bestStart == "" || p.Start < bestStart) {
-			bestStart, bestEnd = p.Start, p.End
+		if p.Start > today && (!found || p.Start < best.Start) {
+			best = p
+			found = true
 		}
 	}
-	if bestStart == "" {
-		return "", "", false
-	}
-	return bestStart, bestEnd, true
+	return best, found
 }
 
 func periodSummary(periods []bonusPeriod) []string {
@@ -665,6 +676,73 @@ func periodSummary(periods []bonusPeriod) []string {
 		out = append(out, p.Start+".."+p.End)
 	}
 	return out
+}
+
+// selectPeriods resolves the `periods` subcommand arg into either the full
+// list (for "all") or a single matching period. Returns a non-empty errCode
+// when the arg is unrecognized or no period matches. todayFn is a hook so
+// tests can pin "today" without time.Now().
+func selectPeriods(periods []bonusPeriod, arg string, todayFn func() string) (items []bonusPeriod, single bool, errCode, errMsg string) {
+	switch arg {
+	case "all":
+		return periods, false, "", ""
+	case "current":
+		t := todayFn()
+		if p, ok := pickPeriodContaining(periods, t); ok {
+			return []bonusPeriod{p}, true, "", ""
+		}
+		return nil, true, "no_period",
+			fmt.Sprintf("no bonus period covers today %q; AH returned %v", t, periodSummary(periods))
+	case "next":
+		if p, ok := pickNextPeriod(periods, todayFn()); ok {
+			return []bonusPeriod{p}, true, "", ""
+		}
+		return nil, true, "no_period",
+			fmt.Sprintf("no bonus period after today %q; AH returned %v", todayFn(), periodSummary(periods))
+	}
+	if _, err := time.Parse("2006-01-02", arg); err != nil {
+		return nil, false, "unexpected_arg",
+			fmt.Sprintf("unexpected argument: %q; usage: appie-extra periods [current|next|all|YYYY-MM-DD]", arg)
+	}
+	if p, ok := pickPeriodContaining(periods, arg); ok {
+		return []bonusPeriod{p}, true, "", ""
+	}
+	return nil, true, "no_period",
+		fmt.Sprintf("no bonus period covers %q; AH returned %v", arg, periodSummary(periods))
+}
+
+func cmdPeriods(ctx context.Context, args []string) {
+	const usage = "appie-extra periods [current|next|all|YYYY-MM-DD]"
+	requireAtMostArgs(args, 1, usage)
+
+	arg := "all"
+	if len(args) == 1 {
+		arg = args[0]
+	}
+
+	client := mustAuthOrEmit(ctx)
+	periods, err := fetchBonusPeriods(ctx, client)
+	if err != nil {
+		emitError("upstream_failed", fmt.Sprintf("bonus metadata failed: %v", err), exitUpstreamError)
+		return
+	}
+
+	items, single, errCode, errMsg := selectPeriods(periods, arg, today)
+	if errCode != "" {
+		exit := exitUserError
+		if errCode == "no_period" {
+			exit = exitNotFound
+		}
+		emitError(errCode, errMsg, exit)
+		return
+	}
+
+	meta := map[string]any{"today": today(), "count": len(items)}
+	if single {
+		emitSuccess(items[0], meta, nil)
+		return
+	}
+	emitSuccess(items, meta, nil)
 }
 
 const fetchBonusBoxOffersQuery = `query FetchBonusBoxOffers(
@@ -1055,6 +1133,7 @@ func cmdHelp() {
 		{"bonus-products", "bonus-products [next|YYYY-MM-DD] [limit]", "Get bonus products for a week (default: today, limit 50)"},
 		{"bonus-spotlight", "bonus-spotlight", "Get featured/highlighted bonus products"},
 		{"bonusbox", "bonusbox [next|YYYY-MM-DD]", "Show personal Bonus Box offers (default: this week)"},
+		{"periods", "periods [current|next|all|YYYY-MM-DD]", "Show AH bonus periods (current, next, all, or for a given date)"},
 		{"add-freetext", "add-freetext <text> [qty]", "Add free-text item to shopping list"},
 		{"batch-add", "batch-add (stdin JSON)", "Add multiple items from stdin JSON"},
 		{"list-to-order", "list-to-order", "Convert shopping list to active order"},
@@ -1120,6 +1199,8 @@ func main() {
 		cmdBonusSpotlight(ctx, args)
 	case "bonusbox", "bonus-box":
 		cmdBonusBox(ctx, args)
+	case "periods":
+		cmdPeriods(ctx, args)
 	case "add-freetext":
 		cmdAddFreetext(ctx, args)
 	case "batch-add":
